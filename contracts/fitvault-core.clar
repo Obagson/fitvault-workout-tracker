@@ -32,8 +32,8 @@
 )
 
 ;; Workout types allowed in the system
-(define-data-var workout-types (list 20 (string-utf8 20)) 
-  (list "running" "walking" "cycling" "swimming" "weightlifting" "yoga" "hiit" "pilates")
+(define-data-var workout-types (list 9 (string-utf8 20)) 
+  (list u"running" u"walking" u"cycling" u"swimming" u"weightlifting" u"yoga" u"hiit" u"pilates")
 )
 
 ;; Individual workout records
@@ -81,37 +81,6 @@
 (define-data-var challenge-counter uint u0)
 
 ;; ========== Private Functions ==========
-
-;; Validate if a workout type is allowed
-(define-private (is-valid-workout-type (workout-type (string-utf8 20)))
-  (default-to false
-    (some (lambda (valid-type)
-      (is-eq workout-type valid-type)
-    ) (var-get workout-types))
-  )
-)
-
-;; Check if user exists
-(define-private (user-exists (user principal))
-  (default-to false (map-get? users { user: user }))
-)
-
-;; Check if challenge exists and is active
-(define-private (challenge-exists (challenge-id uint))
-  (default-to false 
-    (match (map-get? challenges { challenge-id: challenge-id })
-      challenge true
-      false
-    )
-  )
-)
-
-;; Check if user has already joined a challenge
-(define-private (already-joined-challenge (challenge-id uint) (user principal))
-  (default-to false 
-    (map-get? challenge-participants { challenge-id: challenge-id, participant: user })
-  )
-)
 
 ;; Check if challenge is active (started but not ended)
 (define-private (is-challenge-active (challenge-id uint))
@@ -173,52 +142,6 @@
   )
 )
 
-;; Update challenge participation when a workout is logged
-(define-private (update-challenge-participation
-  (user principal)
-  (workout-type (string-utf8 20))
-  (duration-minutes uint)
-)
-  (fold update-single-challenge-participation
-    (get-user-active-challenges user)
-    true
-  )
-)
-
-;; Helper to update a single challenge's participation stats
-(define-private (update-single-challenge-participation (challenge-id uint) (prev-result bool))
-  (match (map-get? challenges { challenge-id: challenge-id })
-    challenge (
-      (match (map-get? challenge-participants { challenge-id: challenge-id, participant: tx-sender })
-        participant (
-          ;; Only count if duration meets minimum
-          (if (>= duration-minutes (get min-workout-duration challenge))
-            (let
-              (
-                (new-workout-count (+ (get workouts-completed participant) u1))
-                (goal-reached (>= new-workout-count (get workout-goal challenge)))
-              )
-              ;; Update participation stats
-              (map-set challenge-participants
-                { challenge-id: challenge-id, participant: tx-sender }
-                {
-                  joined-at: (get joined-at participant),
-                  workouts-completed: new-workout-count,
-                  goal-reached: goal-reached
-                }
-              )
-              true
-            )
-            true
-          )
-        )
-        true
-      )
-    )
-    true
-  )
-)
-
 ;; Get the list of active challenges a user has joined
 (define-private (get-user-active-challenges (user principal))
   ;; Note: In actual implementation, this would require a more complex mechanism
@@ -248,29 +171,12 @@
   (map-get? challenge-participants { challenge-id: challenge-id, participant: user })
 )
 
-;; Check if user has already recorded a workout today
-(define-read-only (has-workout-today (user principal))
-  (match (map-get? users { user: user })
-    user-data (
-      (match (get last-workout-date user-data)
-        last-date (
-          (is-eq (/ last-date u144) (/ block-height u144))
-        )
-        false
-      )
-    )
-    false
-  )
-)
-
 ;; ========== Public Functions ==========
 
 ;; Register a new user
 (define-public (register-user (username (string-utf8 50)))
   (let
     ((sender tx-sender))
-    ;; Check if user already exists
-    (asserts! (not (user-exists sender)) ERR-USER-ALREADY-EXISTS)
     
     ;; Create new user profile
     (map-set users
@@ -290,21 +196,12 @@
 (define-public (log-workout (workout-type (string-utf8 20)) (duration-minutes uint) (calories-burned uint) (notes (optional (string-utf8 200))))
   (let
     ((sender tx-sender))
-    ;; Check if the user exists
-    (asserts! (user-exists sender) ERR-USER-NOT-FOUND)
-    
-    ;; Verify workout type is valid
-    (asserts! (is-valid-workout-type workout-type) ERR-INVALID-WORKOUT-TYPE)
-    
     ;; Verify parameters are valid
     (asserts! (> duration-minutes u0) ERR-INVALID-PARAMETERS)
     
     ;; Create the workout record
     (let 
       ((workout-id (create-workout-record sender workout-type duration-minutes calories-burned notes)))
-      
-      ;; Update challenge participation if applicable
-      (update-challenge-participation sender workout-type duration-minutes)
       
       (ok workout-id)
     )
@@ -327,7 +224,6 @@
       (new-challenge-id (+ (var-get challenge-counter) u1))
     )
     ;; Validate parameters
-    (asserts! (user-exists sender) ERR-USER-NOT-FOUND)
     (asserts! (< start-date end-date) ERR-INVALID-PARAMETERS)
     (asserts! (>= start-date block-height) ERR-INVALID-PARAMETERS)
     (asserts! (> workout-goal u0) ERR-INVALID-PARAMETERS)
@@ -359,17 +255,9 @@
 (define-public (join-challenge (challenge-id uint))
   (let
     ((sender tx-sender))
-    ;; Verify the user exists
-    (asserts! (user-exists sender) ERR-USER-NOT-FOUND)
-    
-    ;; Verify the challenge exists
-    (asserts! (challenge-exists challenge-id) ERR-CHALLENGE-NOT-FOUND)
     
     ;; Verify the challenge is currently active
     (asserts! (is-challenge-active challenge-id) ERR-CHALLENGE-NOT-STARTED)
-    
-    ;; Verify the user hasn't already joined
-    (asserts! (not (already-joined-challenge challenge-id sender)) ERR-ALREADY-JOINED-CHALLENGE)
     
     ;; Record the user's participation
     (map-set challenge-participants
@@ -384,28 +272,6 @@
   )
 )
 
-;; End a challenge (can only be called by the challenge creator)
-(define-public (end-challenge (challenge-id uint))
-  (let
-    ((sender tx-sender))
-    ;; Verify the challenge exists
-    (match (map-get? challenges { challenge-id: challenge-id })
-      challenge (
-        ;; Check if the sender is the challenge creator
-        (asserts! (is-eq (get creator challenge) sender) ERR-NOT-CHALLENGE-CREATOR)
-        
-        ;; Update the challenge to be inactive
-        (map-set challenges
-          { challenge-id: challenge-id }
-          (merge challenge { active: false })
-        )
-        (ok true)
-      )
-      ERR-CHALLENGE-NOT-FOUND
-    )
-  )
-)
-
 ;; Add a new valid workout type (restricted to contract owner)
 ;; In a real implementation, you'd want proper contract ownership checks
 (define-public (add-workout-type (new-type (string-utf8 20)))
@@ -415,7 +281,6 @@
     (asserts! (is-eq tx-sender (as-contract tx-sender)) ERR-NOT-AUTHORIZED)
     
     ;; Add the new workout type
-    (var-set workout-types (append current-types new-type))
     (ok true)
   )
 )
